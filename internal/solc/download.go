@@ -1,12 +1,14 @@
 package solc
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"time"
 )
 
@@ -21,6 +23,54 @@ func ParseVersion(compilerVersion string) (string, error) {
 		return "", fmt.Errorf("could not parse version from %q", compilerVersion)
 	}
 	return matches[1], nil
+}
+
+type solcBuildList struct {
+	Builds []solcBuild `json:"builds"`
+}
+
+type solcBuild struct {
+	Path    string `json:"path"`
+	Version string `json:"version"`
+}
+
+func platformSlug() (string, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		return "macosx-amd64", nil // works on arm64 via Rosetta
+	case "linux":
+		return "linux-amd64", nil
+	default:
+		return "", fmt.Errorf("unsupported platform: %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+}
+
+// findBuildPath fetches the solc-bin list.json and returns the binary path for the given version.
+func findBuildPath(httpClient *http.Client, platform, version string) (string, error) {
+	listURL := fmt.Sprintf("https://binaries.soliditylang.org/%s/list.json", platform)
+
+	resp, err := httpClient.Get(listURL)
+	if err != nil {
+		return "", fmt.Errorf("fetching solc build list: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fetching solc build list: HTTP %d", resp.StatusCode)
+	}
+
+	var list solcBuildList
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return "", fmt.Errorf("parsing solc build list: %w", err)
+	}
+
+	for i := len(list.Builds) - 1; i >= 0; i-- {
+		if list.Builds[i].Version == version {
+			return list.Builds[i].Path, nil
+		}
+	}
+
+	return "", fmt.Errorf("solc v%s not found in %s builds", version, platform)
 }
 
 // EnsureCompiler returns the path to a solc binary for the given version,
@@ -47,10 +97,21 @@ func EnsureCompiler(compilerVersion string) (string, error) {
 		return "", fmt.Errorf("creating solidity directory: %w", err)
 	}
 
-	url := fmt.Sprintf("https://github.com/argotorg/solidity/releases/download/v%s/solc-macos", version)
-	fmt.Fprintf(os.Stderr, "Downloading solc v%s from %s\n", version, url)
+	platform, err := platformSlug()
+	if err != nil {
+		return "", err
+	}
 
 	httpClient := &http.Client{Timeout: 5 * time.Minute}
+
+	buildPath, err := findBuildPath(httpClient, platform, version)
+	if err != nil {
+		return "", err
+	}
+
+	url := fmt.Sprintf("https://binaries.soliditylang.org/%s/%s", platform, buildPath)
+	fmt.Fprintf(os.Stderr, "Downloading solc v%s from %s\n", version, url)
+
 	resp, err := httpClient.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("downloading solc v%s: %w", version, err)
