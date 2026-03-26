@@ -48,8 +48,33 @@ type CompilerError struct {
 }
 
 type ContractOutput struct {
-	ABI json.RawMessage `json:"abi"`
-	EVM EVMOutput       `json:"evm"`
+	ABI           json.RawMessage `json:"abi"`
+	EVM           EVMOutput       `json:"evm"`
+	StorageLayout StorageLayout   `json:"storageLayout"`
+}
+
+type StorageLayout struct {
+	Storage []StorageEntry `json:"storage"`
+	Types   map[string]StorageType `json:"types"`
+}
+
+type StorageEntry struct {
+	ASTId    int    `json:"astId"`
+	Contract string `json:"contract"`
+	Label    string `json:"label"`
+	Offset   int    `json:"offset"`
+	Slot     string `json:"slot"`
+	Type     string `json:"type"`
+}
+
+type StorageType struct {
+	Encoding      string `json:"encoding"`
+	Label         string `json:"label"`
+	NumberOfBytes string `json:"numberOfBytes"`
+	Key           string `json:"key,omitempty"`
+	Value         string `json:"value,omitempty"`
+	Base          string `json:"base,omitempty"`
+	Members       []StorageEntry `json:"members,omitempty"`
 }
 
 type EVMOutput struct {

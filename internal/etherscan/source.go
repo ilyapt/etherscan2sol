@@ -36,16 +36,30 @@ func NormalizeSource(result *Result) (*solc.StandardJSONInput, string, error) {
 	format := DetectSourceFormat(result.SourceCode)
 	settings := buildSettings(result)
 
+	var input *solc.StandardJSONInput
+	var contractName string
+	var err error
+
 	switch format {
 	case FormatFlattened:
-		return normalizeFlattened(result, settings)
+		input, contractName, err = normalizeFlattened(result, settings)
 	case FormatMultiFile:
-		return normalizeMultiFile(result, settings)
+		input, contractName, err = normalizeMultiFile(result, settings)
 	case FormatStandardJSON:
-		return normalizeStandardJSON(result, settings)
+		input, contractName, err = normalizeStandardJSON(result, settings)
 	default:
 		return nil, "", fmt.Errorf("unknown source format")
 	}
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Always force our outputSelection to guarantee we get bytecode and storageLayout.
+	// This must be done here because json.Unmarshal in normalizeMultiFile/normalizeStandardJSON
+	// can mutate shared maps, corrupting the original settings.
+	input.Settings.OutputSelection = requiredOutputSelection()
+
+	return input, contractName, nil
 }
 
 func normalizeFlattened(result *Result, settings solc.CompilerSettings) (*solc.StandardJSONInput, string, error) {
@@ -119,6 +133,14 @@ func normalizeStandardJSON(result *Result, settings solc.CompilerSettings) (*sol
 	return &input, result.ContractName, nil
 }
 
+func requiredOutputSelection() map[string]map[string][]string {
+	return map[string]map[string][]string{
+		"*": {
+			"*": {"abi", "evm.bytecode", "storageLayout"},
+		},
+	}
+}
+
 func buildSettings(result *Result) solc.CompilerSettings {
 	enabled := result.OptimizationUsed == "1"
 
@@ -134,7 +156,7 @@ func buildSettings(result *Result) solc.CompilerSettings {
 		},
 		OutputSelection: map[string]map[string][]string{
 			"*": {
-				"*": {"abi", "evm.bytecode"},
+				"*": {"abi", "evm.bytecode", "storageLayout"},
 			},
 		},
 	}
