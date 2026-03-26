@@ -8,20 +8,24 @@ import (
 
 	"github.com/ilyapt/etherscan2sol/internal/deployer"
 	"github.com/ilyapt/etherscan2sol/internal/etherscan"
+	"github.com/ilyapt/etherscan2sol/internal/rpc"
 	"github.com/ilyapt/etherscan2sol/internal/solc"
+	"github.com/ilyapt/etherscan2sol/internal/storage"
 )
 
-const usage = `Usage: etherscan2sol <command> [flags] <chainId> <address>
+const usage = `Usage: etherscan2sol <command> [flags] <chainId> <address> [args...]
 
 Commands:
   compile    Compile contract and output bytecode
   storage    Compile contract and output storage layout
+  read       Read a storage variable value from a deployed contract
 
 Global flags:
   --api-key  Etherscan API key (or set ETHERSCAN_API_KEY env var)
 
 Command flags:
-  compile --deploy-to=<url>  Deploy bytecode to a node after compilation`
+  compile --deploy-to=<url>                Deploy bytecode after compilation
+  read    --rpc-url=<url> [--block=latest] RPC endpoint for reading storage`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -30,17 +34,27 @@ func main() {
 	}
 
 	command := os.Args[1]
-	if command != "compile" && command != "storage" {
+	switch command {
+	case "compile", "storage", "read":
+	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n%s\n", command, usage)
 		os.Exit(1)
 	}
 
 	fs := flag.NewFlagSet(command, flag.ExitOnError)
 	apiKey := fs.String("api-key", "", "Etherscan API key")
+
 	var deployTo *string
 	if command == "compile" {
 		deployTo = fs.String("deploy-to", "", "Deploy to this JSON-RPC endpoint")
 	}
+
+	var rpcURL, block *string
+	if command == "read" {
+		rpcURL = fs.String("rpc-url", "", "JSON-RPC endpoint for reading storage")
+		block = fs.String("block", "latest", "Block number or tag")
+	}
+
 	fs.Parse(os.Args[2:])
 
 	if *apiKey == "" {
@@ -52,15 +66,32 @@ func main() {
 	}
 
 	args := fs.Args()
-	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: etherscan2sol %s [flags] <chainId> <address>\n", command)
-		os.Exit(1)
-	}
-	chainID := args[0]
-	address := args[1]
 
-	// Fetch and compile
-	compiled, contractName := fetchAndCompile(*apiKey, chainID, address)
+	switch command {
+	case "compile", "storage":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "Usage: etherscan2sol %s [flags] <chainId> <address>\n", command)
+			os.Exit(1)
+		}
+		runCompileOrStorage(command, *apiKey, args[0], args[1], deployTo)
+
+	case "read":
+		if rpcURL == nil || *rpcURL == "" {
+			fmt.Fprintln(os.Stderr, "Error: --rpc-url is required for the read command")
+			os.Exit(1)
+		}
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: etherscan2sol read --rpc-url=<url> [--block=latest] <chainId> <address> <variable> [key1] [key2] ...")
+			os.Exit(1)
+		}
+		chainID, address, variable := args[0], args[1], args[2]
+		keys := args[3:]
+		runRead(*apiKey, *rpcURL, *block, chainID, address, variable, keys)
+	}
+}
+
+func runCompileOrStorage(command, apiKey, chainID, address string, deployTo *string) {
+	compiled, contractName := fetchAndCompile(apiKey, chainID, address)
 
 	switch command {
 	case "storage":
@@ -85,6 +116,54 @@ func main() {
 			}
 			fmt.Fprintf(os.Stderr, "Deployed at: %s\n", contractAddr)
 		}
+	}
+}
+
+func runRead(apiKey, rpcURL, block, chainID, address, variable string, keys []string) {
+	// Compile to get storageLayout (uses implementation source for proxies)
+	compiled, _ := fetchAndCompile(apiKey, chainID, address)
+
+	// Resolve variable + keys to storage slot(s)
+	slots, err := storage.Resolve(compiled.StorageLayout, variable, keys)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving variable: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Read and decode each slot
+	client := rpc.NewClient(rpcURL)
+	values := make([]*storage.DecodedValue, 0, len(slots))
+
+	for _, slot := range slots {
+		raw, err := client.GetStorageAt(address, slot.Slot, block)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading storage: %v\n", err)
+			os.Exit(1)
+		}
+
+		val, err := storage.Decode(raw, slot, compiled.StorageLayout.Types)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding value: %v\n", err)
+			os.Exit(1)
+		}
+		values = append(values, val)
+	}
+
+	// Output
+	if len(values) == 1 {
+		fmt.Println(values[0].Value)
+	} else {
+		// Struct: output as JSON object
+		obj := make(map[string]any, len(values))
+		for _, v := range values {
+			obj[v.Label] = v.Value
+		}
+		out, err := json.MarshalIndent(obj, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling output: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(out))
 	}
 }
 

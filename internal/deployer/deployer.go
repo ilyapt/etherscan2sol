@@ -1,67 +1,28 @@
 package deployer
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"time"
+
+	"github.com/ilyapt/etherscan2sol/internal/rpc"
 )
 
 type Deployer struct {
-	rpcURL     string
-	httpClient *http.Client
+	client *rpc.Client
 }
 
 func NewDeployer(rpcURL string) *Deployer {
 	return &Deployer{
-		rpcURL: rpcURL,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		client: rpc.NewClient(rpcURL),
 	}
-}
-
-func (d *Deployer) call(method string, params interface{}) (json.RawMessage, error) {
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		Method:  method,
-		Params:  params,
-		ID:      1,
-	}
-
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	resp, err := d.httpClient.Post(d.rpcURL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("POST %s: %w", method, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("POST %s: HTTP %d", method, resp.StatusCode)
-	}
-
-	var rpcResp jsonRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		return nil, fmt.Errorf("decode response for %s: %w", method, err)
-	}
-
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
-	}
-
-	return rpcResp.Result, nil
 }
 
 func (d *Deployer) Deploy(bytecode string) (string, error) {
 	// Step 1: Get accounts
-	fmt.Fprintf(os.Stderr, "Fetching accounts from %s...\n", d.rpcURL)
-	result, err := d.call("eth_accounts", []interface{}{})
+	fmt.Fprintf(os.Stderr, "Fetching accounts...\n")
+	result, err := d.client.Call("eth_accounts", []any{})
 	if err != nil {
 		return "", fmt.Errorf("eth_accounts: %w", err)
 	}
@@ -77,7 +38,7 @@ func (d *Deployer) Deploy(bytecode string) (string, error) {
 
 	// Step 2: Send deployment transaction
 	fmt.Fprintf(os.Stderr, "Sending deployment transaction...\n")
-	result, err = d.call("eth_sendTransaction", []interface{}{map[string]string{
+	result, err = d.client.Call("eth_sendTransaction", []any{map[string]string{
 		"from": accounts[0],
 		"data": "0x" + bytecode,
 		"gas":  "0x1000000",
@@ -95,9 +56,9 @@ func (d *Deployer) Deploy(bytecode string) (string, error) {
 	// Step 3: Poll for receipt
 	var receipt transactionReceipt
 	const maxAttempts = 30
-	for i := 0; i < maxAttempts; i++ {
+	for i := range maxAttempts {
 		fmt.Fprintf(os.Stderr, "Polling for receipt (attempt %d/%d)...\n", i+1, maxAttempts)
-		result, err = d.call("eth_getTransactionReceipt", []interface{}{txHash})
+		result, err = d.client.Call("eth_getTransactionReceipt", []any{txHash})
 		if err != nil {
 			return "", fmt.Errorf("eth_getTransactionReceipt: %w", err)
 		}
